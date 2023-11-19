@@ -1,0 +1,225 @@
+name: Demo deploy
+
+on:
+  push:
+    branches:
+      - 'develop'
+
+env:
+ ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+
+jobs:
+  DeployVersion:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.build_number.outputs.version }}
+
+    steps:
+      - name: Generate Build Version
+        id: build_number
+        run: |
+          $FetchDate = Get-Date -format "dd-MM-yy"
+          $FetchDate = $FetchDate -split "-"
+          
+          if ($FetchDate[0] -gt 0 -and $FetchDate[0] -le 15)
+          { 
+              $sprint = 0
+              Write-host $sprint
+          }
+          else
+          {
+             $sprint = 1
+             Write-host $sprint
+          }
+          if($Fetchdate[1] -eq 12)
+          {
+            $Fetchdate[1] = 0
+            $FetchDate[2]=  1 + $FetchDate[2]
+            $Fetchdate[1] = 1 + $Fetchdate[1] 
+          }
+          else 
+          {
+           $Fetchdate[1] = 1 + $Fetchdate[1]
+          }
+          [int]$Checkdate = $Fetchdate[1]
+          if ($Checkdate -gt 0 -and $Checkdate -le 9)
+          {
+             $Fetchdate[1] = "0" + $Fetchdate[1]
+          }
+          $version = $FetchDate[2]+ $FetchDate[1]+"."+$sprint+"."+${{ github.run_number }}
+          Write-host  $version
+          echo "The current release number is: " $version
+          echo "::set-output name=version::${version}"
+          echo "::set-env name=build_version::$(echo ${version})"
+     
+      - name: Write Build Version
+        run: |
+            echo "The current build number is: "${{ env.build_version }}      
+ 
+  DR-Demo-Automated-Set-Parmts:
+    needs: DeployVersion
+    runs-on: [self-hosted, Linux ]
+    env:
+      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+      ReleaseSet: ${{needs.DeployVersion.outputs.version}}
+    steps:
+    - run: echo "The releaseSet version is:" ${{ env.ReleaseSet }}
+    - uses: actions/checkout@v2
+    
+    - name: DR-Demo-Automated-Set-Parmts
+      run : |
+       #Call into BIAS to determine what site is enabled
+        sitebstatus=$(curl "http://cobalttools.demo.int.westgroup.com:3777/poollight?bigip=bigipcobaltsvcdemoe.int.thomsonreuters.com&name=dr.Platform-ManagementPool" | grep -A 1 163.231.17.14 | grep status | cut -d'>' -f 2 | cut -d'<' -f 1)
+        sitepc1status=$(curl "http://cobalttools.demo.int.westgroup.com:3777/poollight?bigip=bigipcobaltsvcdemoe.int.thomsonreuters.com&name=dr.Platform-ManagementPool" | grep -A 1 163.231.17.47 | grep status | cut -d'>' -f 2 | cut -d'<' -f 1)
+        echo siteb status=$sitebstatus
+        echo sitepc1 status=$sitepc1status
+       if [ ${sitebstatus} = "ENABLED" -a ${sitepc1status} = "ENABLED" ]; then
+        echo "Both sites are active - something is wrong - stopping the deployment"
+       exit 1
+       fi
+       #If Siteb enabled set the pipeline to deploy to sitepc1
+       if [ ${sitebstatus} = "ENABLED" ]; then
+         echo Site=pc1 >build.properties
+       fi
+        #If Sitepc1 enabled set the pipeline to deploy to siteb
+        if [ ${sitepc1status} = "ENABLED" ]; then
+       echo Site=b >build.properties
+        fi
+       cat build.properties
+
+  DR-Demo-CI-Smoke-Test-Automated:
+     needs: [DeployVersion,DR-Demo-Automated-Set-Parmts]
+     runs-on: [self-hosted, Windows ]
+     env:
+      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+      ReleaseSet: ${{needs.DeployVersion.outputs.version}}
+     steps:
+     - run: echo ${{ env.ReleaseSet }}
+
+    #  - name: Clean workspace
+    #    run: |
+    #        Remove-Item -Path ${{ github.workspace}}\* -Recurse -Force -ErrorAction SilentlyContinue
+    #        echo "Removed the content of workspace"
+    #        dir   
+     - uses: actions/checkout@v2
+     
+    #  - name: DR-Demo-CI-Smoke-Test-Automated
+    #    shell : cmd
+    #    run : |
+    #        # Get-ChildItem -Path C:\ -Directory
+    #        # cd C:\CleanNASSpace
+    #        # ls
+    #        # cd bin
+    #        # ls
+    #        cd AntScript
+    #        C:\Ant\apache-ant-1.9.2\bin\ant.bat -file SmokeTestAntScript.xml "-DSite=b" "-DRetain=false" "-DDryRun=true" "-Dautodeploy=true" "-Denvironment=ci" "-Dversion=2311.1.602" "-Djar.release.version=latest"
+
+  DR-Demo-Create-DR-Demo-Release-Set-Automated:
+     needs: [DeployVersion,DR-Demo-Automated-Set-Parmts,DR-Demo-CI-Smoke-Test-Automated]
+     runs-on: [self-hosted, Linux ]
+     env:
+      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+      ReleaseSet: ${{needs.DeployVersion.outputs.version}}
+     steps: 
+     - run: echo ${{ env.ReleaseSet }}
+     - name: DR-Demo-Create-DR-Demo-Release-Set-Automated
+       run: |
+          ls
+          curl http://cobalttools-cs.ci.int.westgroup.com/cmdb/rest/GenerateReleaseSetResource/GenerateReleaseSet/dr/${{ env.ReleaseSet }}
+
+  DR-Demo-Retain-ReleaseSet:
+     needs: [DeployVersion,DR-Demo-Automated-Set-Parmts,DR-Demo-CI-Smoke-Test-Automated,DR-Demo-Create-DR-Demo-Release-Set-Automated]
+     runs-on: [self-hosted, Linux ]
+     env:
+      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+      ReleaseSet: ${{needs.DeployVersion.outputs.version}}
+
+     steps:
+     - run: echo ${{ env.ReleaseSet }}
+     - name: DR.Demo-Retain-ReleaseSet
+       run : |
+           #  "Retainer API needs the release set to have 'A's instead of '.'s. i.e 30.5.4 must be 30A5A4"
+           ls
+           echo ${{ env.ReleaseSet }}
+           SEDReleaseSet=$(echo ${{ env.ReleaseSet }} | sed 's/\./A/g')
+           echo $SEDReleaseSet
+           curl -H "Accept: application/xml" -H "Content-Type: application/xml" -u ecomqc/svcwebtoolkit:$password --ntlm http://c312eehappdo.ecomqc.tlrg.com:9007/api/ReleaseSetRetain/$SEDReleaseSet -o rs.xml
+           curl -X POST -H "Content-Type:text/xml;charset=UTF-8" -d @rs.xml -u ecomqc/svcwebtoolkit:$password --ntlm http://c312eehappdo.ecomqc.tlrg.com:9007/api/ReleaseSetRetain?retainAction="RETAIN"
+           curl -X POST "http://jenkins.int.thomsonreuters.com:8080/job/Dataroom.Release.Set.Transfer/buildWithParameters?token=transferToken&ReleaseSetNumber=${{ env.ReleaseSet }}&Location=ALL"
+
+
+  DR-Demo-PreDeployNotify:
+     needs: [DeployVersion,DR-Demo-Automated-Set-Parmts,DR-Demo-CI-Smoke-Test-Automated,DR-Demo-Create-DR-Demo-Release-Set-Automated,DR-Demo-Retain-ReleaseSet]
+     runs-on: [self-hosted, Linux ]
+     env:
+      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+      ReleaseSet: ${{needs.DeployVersion.outputs.version}}
+     steps:  
+     - run: echo ${{ env.ReleaseSet }}
+     - name: DR.Demo-PreDeployNotify
+       run : |
+           ls
+           curl http://cobalttools.demo.int.westgroup.com:4000/cobaltReleaseqc/releaseSet/${{ env.ReleaseSet }}/release.xml
+
+
+
+  DR-Demo-Deploy-Release-Set:
+     needs: [DeployVersion,DR-Demo-Automated-Set-Parmts,DR-Demo-CI-Smoke-Test-Automated,DR-Demo-Create-DR-Demo-Release-Set-Automated,DR-Demo-Retain-ReleaseSet,DR-Demo-PreDeployNotify]
+    # runs-on: [self-hosted, Linux ]
+     runs-on: [self-hosted, Windows ]
+     env:
+      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+      ReleaseSet: ${{needs.DeployVersion.outputs.version}}
+     steps:  
+     - run: echo ${{ env.ReleaseSet }}
+     - name: DR-Demo-Deploy-Release-Set
+       run : |
+            ls
+            cd AntScript
+            C:\Ant\apache-ant-1.9.3\bin\ant.bat -file deployReleaseSetnoDID.xml "-DrunSchemaValidation=false" "-DSite=b" "-DDryRun=false" "-DdeployEnv=demodr" "-Dproject=cobaltservices" "-Denvironment=38" "-DenvironmentId=38" "-DscriptName=deploydemodrReleaseSetWithVerify" "-Dversion=${{ env.ReleaseSet }}" "-Drelease.nas.password=${{ secrets.ECOMQC_PASS }}" "-DNODE_AGENT_PASSWORD=${{ secrets.CONTROLROLE_PASS }}"
+
+#   DR-Demo-Site-Smoke-Tests:
+#      needs: [DeployVersion,DR-Demo-Automated-Set-Parmts,DR-Demo-CI-Smoke-Test-Automated,DR-Demo-Create-DR-Demo-Release-Set-Automated,DR-Demo-Retain-ReleaseSet,DR-Demo-PreDeployNotify,DR-Demo-Deploy-Release-Set]
+#      runs-on: [self-hosted, Linux ]
+#      env:
+#       ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+#       ReleaseSet: ${{needs.DeployVersion.outputs.version}}
+#      steps:  
+#      - run: echo ${{ env.ReleaseSet }}
+#      - name: DR.Demo-Site-Smoke-Tests
+#        run : |
+#             ls  
+
+#   DR-Demo-Enable-Disable-DR-Demo-Site:
+#      needs: [DeployVersion,DR-Demo-Automated-Set-Parmts,DR-Demo-CI-Smoke-Test-Automated,DR-Demo-Create-DR-Demo-Release-Set-Automated,DR-Demo-Retain-ReleaseSet,DR-Demo-PreDeployNotify,DR-Demo-Deploy-Release-Set,DR-Demo-Site-Smoke-Tests]
+#      runs-on: [self-hosted, Linux ]
+#      env:
+#       ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+#       ReleaseSet: ${{needs.DeployVersion.outputs.version}}
+#      steps:  
+#      - run: echo ${{ env.ReleaseSet }}
+#      - name: DR.Demo-Enable-Disable-DR-Demo-Site
+#        run : |
+#             ls 
+#   DR-Demo-Smoke-Tests-No-Site:
+#      needs: [DeployVersion,DR-Demo-Automated-Set-Parmts,DR-Demo-CI-Smoke-Test-Automated,DR-Demo-Create-DR-Demo-Release-Set-Automated,DR-Demo-Retain-ReleaseSet,DR-Demo-PreDeployNotify,DR-Demo-Deploy-Release-Set,DR-Demo-Site-Smoke-Tests,DR-Demo-Enable-Disable-DR-Demo-Site]
+#      runs-on: [self-hosted, Linux ]
+#      env:
+#       ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+#       ReleaseSet: ${{needs.DeployVersion.outputs.version}}
+#      steps:  
+#      - run: echo ${{ env.ReleaseSet }}
+#      - name: DR.Demo-Smoke-Tests-No-Site
+#        run : |
+#             ls 
+#   DR-Demo-PostDeployNotify:
+#      needs: [DeployVersion,DR-Demo-Automated-Set-Parmts,DR-Demo-CI-Smoke-Test-Automated,DR-Demo-Create-DR-Demo-Release-Set-Automated,DR-Demo-Retain-ReleaseSet,DR-Demo-PreDeployNotify,DR-Demo-Deploy-Release-Set,DR-Demo-Site-Smoke-Tests,DR-Demo-Enable-Disable-DR-Demo-Site,DR-Demo-Smoke-Tests-No-Site]
+#      runs-on: [self-hosted, Linux ]
+#      env:
+#       ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+#       ReleaseSet: ${{needs.DeployVersion.outputs.version}}
+#      steps:  
+#      - run: echo ${{ env.ReleaseSet }}
+#      - name: DR.Demo-PostDeployNotify
+#        run : |
+#       
